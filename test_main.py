@@ -1,54 +1,60 @@
 import pytest
 import asyncio
+import json
 from httpx import AsyncClient, ASGITransport
 from main import app
 
 @pytest.mark.asyncio
-async def test_login_success():
-    # [테스트 및 실행 요구사항] FastAPI의 ASGI 앱과 직접 통신하는 AsyncClient 설정
+async def test_login_and_sse_status_success():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # Phase 1: 로그인 요청 (admin/1234)
+        # 1. 로그인 요청
         response = await ac.post("/api/login", json={"user_id": "admin", "user_pw": "1234"})
         assert response.status_code == 202
-        data = response.json()
-        task_id = data["task_id"]
-        assert data["status"] == "PENDING"
+        task_id = response.json()["task_id"]
 
-        # Phase 3: 상태 확인 폴링 (Polling)
-        # SUCCESS 상태가 될 때까지 최대 10번 시도 (0.5초 간격)
-        status_data = {}
-        for _ in range(10):
-            await asyncio.sleep(0.5)
-            status_resp = await ac.get(f"/api/status/{task_id}")
-            assert status_resp.status_code == 200
-            status_data = status_resp.json()
-            if status_data["status"] != "PENDING":
-                break
-        
-        # 결과 검증: SUCCESS 여부 확인
-        assert status_data["status"] == "SUCCESS"
-        assert status_data["message"] is None
+        # 2. SSE 연결 및 데이터 수신
+        # httpx.stream을 사용하여 SSE 이벤트를 실시간으로 읽음
+        async with ac.stream("GET", f"/api/status/{task_id}") as response:
+            assert response.status_code == 200
+            
+            final_result = None
+            # 응답 라인을 하나씩 읽으며 이벤트 파싱
+            async for line in response.aiter_lines():
+                if line.startswith("event: result"):
+                    # 다음 줄은 'data: ...' 형태임
+                    continue
+                if line.startswith("data:"):
+                    data_str = line[len("data: "):]
+                    # JSON 데이터 파싱 (ping 이벤트는 건너뜀)
+                    if "SUCCESS" in data_str:
+                        final_result = json.loads(data_str)
+                        break
+            
+            # 3. 결과 검증
+            assert final_result is not None
+            assert final_result["status"] == "SUCCESS"
+            assert "summary" in final_result["result"]
+            assert final_result["result"]["scraped_data"]["site_1"].startswith("사이트 1")
 
 @pytest.mark.asyncio
-async def test_login_failed():
+async def test_login_and_sse_status_failed():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # Phase 1: 로그인 요청 (admin/wrong_pw)
+        # 1. 로그인 실패 요청
         response = await ac.post("/api/login", json={"user_id": "admin", "user_pw": "wrong_pw"})
         assert response.status_code == 202
-        data = response.json()
-        task_id = data["task_id"]
-        assert data["status"] == "PENDING"
+        task_id = response.json()["task_id"]
 
-        # Phase 3: 상태 확인 폴링 (Polling)
-        status_data = {}
-        for _ in range(10):
-            await asyncio.sleep(0.5)
-            status_resp = await ac.get(f"/api/status/{task_id}")
-            assert status_resp.status_code == 200
-            status_data = status_resp.json()
-            if status_data["status"] != "PENDING":
-                break
-        
-        # 결과 검증: FAILED 여부 및 에러 메시지 확인
-        assert status_data["status"] == "FAILED"
-        assert status_data["message"] == "Invalid Credentials"
+        # 2. SSE 연결 및 에러 데이터 수신
+        async with ac.stream("GET", f"/api/status/{task_id}") as response:
+            final_result = None
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    data_str = line[len("data: "):]
+                    if "FAILED" in data_str:
+                        final_result = json.loads(data_str)
+                        break
+            
+            # 3. 결과 검증
+            assert final_result is not None
+            assert final_result["status"] == "FAILED"
+            assert final_result["message"] == "Invalid Credentials"
