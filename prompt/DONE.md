@@ -16,7 +16,9 @@ use context7. Context7의 find-docs 스킬을 사용해 최신 FastAPI 및 pytes
 3. 테스트 코드는 클라이언트가 /api/login을 호출한 후, while 루프를 통해 /api/status/{task_id}를 주기적으로 폴링(Polling)하여 최종 상태(SUCCESS 또는 FAILED)를 확인하는 흐름까지 완벽하게 구현할 것.
 4. 파일 작성이 완료되면, 터미널 명령어를 사용해 `pytest test_main.py -v`를 직접 실행하고 그 결과를 나에게 분석해서 보여줄 것.
 
----
+--------------------------------------------
+--------------------------------------------
+
 # 작업 지시서: 공적조서 결과 반환 API 고도화
 
 현재 비동기 작업 큐로 동작하는 FastAPI 프로젝트에 다음 사항을 적용하여 코드를 리팩토링해 줘. 공식 문서(FastAPI, sse-starlette)를 참고하여 환각 없이 정확한 코드를 작성할 것.
@@ -33,7 +35,59 @@ use context7. Context7의 find-docs 스킬을 사용해 최신 FastAPI 및 pytes
 - FastAPI에서 `StreamingResponse` 또는 `sse-starlette` 패키지를 사용하여, 클라이언트가 1회 연결하면 서버 내부의 asyncio 루프가 상태 변화를 감지하다가 작업 완료(SUCCESS) 시점에 JSON 데이터를 Push 하고 연결을 종료하도록 구현할 것.
 - 무한 대기를 방지하기 위한 적절한 타임아웃 처리를 포함할 것.
 
-## 3. 워크플로우 관리 (파일 조작)
-- 위 코드 수정과 단위 테스트 코드(`test_main.py` 갱신) 작성이 모두 성공적으로 끝나면, 현재 읽고 있는 이 `TO_DO.md` 파일의 모든 내용을 `DONE.md` 파일의 맨 밑에 추가할 것. 
-- 이때, 이전 내용과 구분될 수 있도록 `DONE.md`에 `\n---\n` 구분선을 먼저 삽입할 것.
-- 파일 이동이 완료되면 `TO_DO.md` 파일의 내용을 전부 지워 빈 파일로 만들 것.
+
+--------------------------------------------
+
+--------------------------------------------
+
+# 작업 지시서: 공적조서 2-Phase 아키텍처 및 세밀한 SSE 진행 상태 구현
+
+현재의 단일 백그라운드 태스크 구조를 2개의 독립적인 Task와 엔드포인트로 완전히 분리하고, 스크래핑 진행 상황을 세밀하게 전달하는 프로토타입을 작성해 줘. (보안상 실제 크롤링/LLM 코드는 배제하고 `asyncio.sleep`을 활용한 Mockup 코드로 작성할 것)
+
+## 1. 데이터 모델 정의 (Pydantic)
+- `./model/request.py` 의 코드를 참고할 것
+- `tasks_db` (상태 머신): 기존 구조를 유지하되, 스크래핑 진행도를 추적하기 위해 `progress` (완료된 사이트 이름을 담는 리스트) 필드를 추가할 것.
+
+## 2. API 엔드포인트 및 Background Tasks 분리
+다음 2개의 POST 엔드포인트를 만들고, 각각 독립적인 비동기 함수를 `BackgroundTasks`에 `add_task` 하도록 구현할 것.
+
+**A. `POST /api/extract` (Extracting Task)**
+- `InitialRequest`를 받음.
+- 백그라운드 함수 (`extracting_task`):
+  1. 3개의 사이트를 순차적(또는 `asyncio.gather`로 동시)으로 스크래핑하는 것을 시뮬레이션함 (`await asyncio.sleep(1)` 반복).
+  2. **[핵심]** 각 사이트 스크래핑이 끝날 때마다 `tasks_db[task_id]["progress"]` 리스트에 해당 사이트 이름(예: "site_1")을 append 할 것.
+  3. 3개 사이트 완료 후, LLM 요약을 시뮬레이션하고 최종 결과(공적요지, 내용)를 `tasks_db`의 `result`에 저장 후 상태를 `EXTRACT_SUCCESS`로 변경.
+
+**B. `POST /api/generate` (Generating Task)**
+- `GenerationRequest`를 받음.
+- 클라이언트가 이전 Task의 결과 중 일부(`selected_contexts`)만 골라서 다시 요청하는 엔드포인트임.
+- 백그라운드 함수 (`generating_task`):
+  1. `tasks_db`의 상태를 다시 `GENERATING`으로 변경.
+  2. 전달받은 `selected_contexts`를 바탕으로 LLM 재생성을 시뮬레이션 (`await asyncio.sleep(2)`).
+  3. 완료 시 상태를 `GENERATE_SUCCESS`로 변경하고 최종 문서 결과를 저장.
+
+## 3. SSE 엔드포인트 고도화 (`GET /api/status/{task_id}`)
+- 클라이언트가 하나의 엔드포인트로 두 Task의 상태를 모두 추적할 수 있어야 함.
+- `while True` 루프 내에서 상태를 감지하여 다음 이벤트를 yield 할 것:
+  - **진행 이벤트:** `tasks_db`의 `progress` 리스트 길이를 추적하여, 새로운 사이트가 추가될 때마다 `event: progress`, `data: {"site": "site_1", "status": "done"}` 형태의 가벼운 JSON 메시지를 push 할 것 (데이터 전체를 보내지 않음).
+  - **1차 완료 이벤트:** 상태가 `EXTRACT_SUCCESS`가 되면 요약된 전체 데이터를 push. (이후 UI에서 사용자가 선택할 수 있도록 연결 유지 또는 종료 플래그 제공)
+  - **최종 완료 이벤트:** 상태가 `GENERATE_SUCCESS`가 되면 최종 재생성된 문서를 push 하고 연결 종료(`break`).
+
+## 4. 제약 사항
+- 모든 비동기 통신 및 SSE 구현은 `FastAPI` 및 `sse-starlette` 공식 문서의 패턴을 준수할 것.
+- 블로킹(Blocking) 코드가 절대 포함되지 않도록 주의할 것.
+--------------------------------------------
+
+--------------------------------------------
+
+DB에 저장되는 데이터를 정확한 데이터 모델로 정의하려고 해.
+
+- task_id로 DB의 정보를 조회 가능
+- 조회한 정보는 'status, 'content' 'message'가 있음.
+- content는 'data_extracted', data_generated'가 있음
+- data_extracted에는 'hr', 'assessment', 'onnara'가 있음
+- data_generated에는 'summary', 'accomplishment'가 있음
+- hr은 HrDocument라는 데이터 모델을 타입으로 가짐
+- assessment는 list[AssessmentDocument]라는 데이터 모델을 타입으로 가짐
+- onnara는 list[OnnarDocument]라는 데이터 모델을 타입으로 가짐.
+- summary, accomplishment는 str을 타입으로 가짐

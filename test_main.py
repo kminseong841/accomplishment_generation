@@ -1,60 +1,62 @@
 import pytest
 import asyncio
 import json
-from httpx import AsyncClient, ASGITransport
-from main import app
+import sys
+from httpx import AsyncClient
 
 @pytest.mark.asyncio
-async def test_login_and_sse_status_success():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # 1. 로그인 요청
-        response = await ac.post("/api/login", json={"user_id": "admin", "user_pw": "1234"})
-        assert response.status_code == 202
-        task_id = response.json()["task_id"]
+async def test_full_2phase_flow_real_server():
+    print("\n[Test] Starting 2-Phase Flow Test (Real Server)...", file=sys.stderr)
+    # 실제 서버 주소 사용
+    base_url = "http://localhost:8000"
+    
+    async with AsyncClient(base_url=base_url, timeout=30.0) as ac:
+        # 1. Phase 1: 추출 요청
+        extract_payload = {
+            "hr_id": "user123", "hr_pw": "pw123", "sofotoken": "token123", "prompt": "최신 업적 요약해줘"
+        }
+        print("[Test] Sending Phase 1 request...", file=sys.stderr)
+        resp = await ac.post("/api/extract", json=extract_payload)
+        assert resp.status_code == 202
+        task_id = resp.json()["task_id"]
+        print(f"[Test] Task ID: {task_id}", file=sys.stderr)
 
-        # 2. SSE 연결 및 데이터 수신
-        # httpx.stream을 사용하여 SSE 이벤트를 실시간으로 읽음
+        events = []
+        
+        # 2. SSE 연결
+        print("[Test] Connecting to SSE stream...", file=sys.stderr)
         async with ac.stream("GET", f"/api/status/{task_id}") as response:
             assert response.status_code == 200
+            print("[Test] SSE Connection established.", file=sys.stderr)
             
-            final_result = None
-            # 응답 라인을 하나씩 읽으며 이벤트 파싱
             async for line in response.aiter_lines():
-                if line.startswith("event: result"):
-                    # 다음 줄은 'data: ...' 형태임
+                if not line.strip(): continue
+                print(f"[SSE Rx] {line}", file=sys.stderr)
+                
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
                     continue
+                
                 if line.startswith("data:"):
-                    data_str = line[len("data: "):]
-                    # JSON 데이터 파싱 (ping 이벤트는 건너뜀)
-                    if "SUCCESS" in data_str:
-                        final_result = json.loads(data_str)
-                        break
-            
-            # 3. 결과 검증
-            assert final_result is not None
-            assert final_result["status"] == "SUCCESS"
-            assert "summary" in final_result["result"]
-            assert final_result["result"]["scraped_data"]["site_1"].startswith("사이트 1")
+                    data_str = line[len("data:"):].strip()
+                    data = json.loads(data_str)
+                    events.append({"event": event_type, "data": data})
+                    
+                    if event_type == "extract_result":
+                        print("[Test] Phase 1 Success! Triggering Phase 2...", file=sys.stderr)
+                        gen_payload = {
+                            "task_id": task_id,
+                            "selected_contexts": data["contexts"][:2],
+                            "prompt": "더 정중하게 써줘"
+                        }
+                        await ac.post("/api/generate", json=gen_payload)
 
-@pytest.mark.asyncio
-async def test_login_and_sse_status_failed():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # 1. 로그인 실패 요청
-        response = await ac.post("/api/login", json={"user_id": "admin", "user_pw": "wrong_pw"})
-        assert response.status_code == 202
-        task_id = response.json()["task_id"]
-
-        # 2. SSE 연결 및 에러 데이터 수신
-        async with ac.stream("GET", f"/api/status/{task_id}") as response:
-            final_result = None
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    data_str = line[len("data: "):]
-                    if "FAILED" in data_str:
-                        final_result = json.loads(data_str)
+                    if event_type == "final_result":
+                        print("[Test] Final Result received. Success.", file=sys.stderr)
                         break
-            
-            # 3. 결과 검증
-            assert final_result is not None
-            assert final_result["status"] == "FAILED"
-            assert final_result["message"] == "Invalid Credentials"
+
+        # 3. 검증
+        assert any(e["event"] == "progress" for e in events)
+        assert any(e["event"] == "extract_result" for e in events)
+        assert any(e["event"] == "final_result" for e in events)
+        print("[Test] All assertions passed!", file=sys.stderr)
