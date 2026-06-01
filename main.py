@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, Header
 from fastapi.responses import StreamingResponse
 import asyncio
 import uuid
@@ -14,40 +14,29 @@ tasks_db: Dict[str, Dict[str, Any]] = {}
 
 # --- Background Tasks ---
 
-async def extracting_task(task_id: str, req: InitialRequest):
-    """
-    Phase 1: 3개 사이트 스크래핑 및 LLM 요약 시뮬레이션
-    """
+async def extracting_task(task_id: str, req: InitialRequest, sofotoken: str):
     try:
         tasks_db[task_id]["status"] = TaskStatus.EXTRACTING
-        
         sites = ["site_korea", "site_police", "site_gov"]
-        
         for site in sites:
             await asyncio.sleep(0.1)
             tasks_db[task_id]["progress"].append(site)
-            
         await asyncio.sleep(0.1)
         tasks_db[task_id]["result"] = {
-            "summary": "과거 10년간 우수 행정 사례로 3회 표창된 이력이 확인됨.",
-            "contexts": ["Ctx1", "Ctx2", "Ctx3"]
+            "summary": "Summary...",
+            "contexts": ["Ctx 1", "Ctx 2", "Ctx 3"]
         }
         tasks_db[task_id]["status"] = TaskStatus.EXTRACT_SUCCESS
-        
     except Exception as e:
         tasks_db[task_id]["status"] = TaskStatus.FAILED
         tasks_db[task_id]["message"] = str(e)
 
 async def generating_task(task_id: str, req: GenerationRequest):
-    """
-    Phase 2: 최종 공적조서 생성 시뮬레이션
-    """
     try:
         tasks_db[task_id]["status"] = TaskStatus.GENERATING
-        await asyncio.sleep(0.2)
-        tasks_db[task_id]["final_doc"] = f"최종 공적조서: {len(req.selected_contexts)}개 선택됨"
+        await asyncio.sleep(0.1)
+        tasks_db[task_id]["final_doc"] = f"Final document based on {len(req.selected_contexts)} contexts."
         tasks_db[task_id]["status"] = TaskStatus.GENERATE_SUCCESS
-        
     except Exception as e:
         tasks_db[task_id]["status"] = TaskStatus.FAILED
         tasks_db[task_id]["message"] = str(e)
@@ -55,7 +44,7 @@ async def generating_task(task_id: str, req: GenerationRequest):
 # --- API Endpoints ---
 
 @app.post("/api/extract", status_code=status.HTTP_202_ACCEPTED)
-async def extract(request: InitialRequest):
+async def extract(request: InitialRequest, authorization: str = Header(...)):
     task_id = str(uuid.uuid4())
     tasks_db[task_id] = {
         "status": TaskStatus.PENDING,
@@ -64,14 +53,13 @@ async def extract(request: InitialRequest):
         "final_doc": None,
         "message": None
     }
-    asyncio.create_task(extracting_task(task_id, request))
+    asyncio.create_task(extracting_task(task_id, request, authorization))
     return {"task_id": task_id, "status": TaskStatus.PENDING}
 
 @app.post("/api/generate", status_code=status.HTTP_202_ACCEPTED)
 async def generate(request: GenerationRequest):
     if request.task_id not in tasks_db:
         raise HTTPException(status_code=404, detail="Task not found")
-    
     tasks_db[request.task_id]["status"] = TaskStatus.GENERATING
     asyncio.create_task(generating_task(request.task_id, request))
     return {"task_id": request.task_id, "status": TaskStatus.GENERATING}
@@ -82,7 +70,9 @@ async def get_status_sse(task_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Task not found")
 
     async def event_generator():
-        yield f"event: connected\ndata: {json.dumps({'status': 'ready'})}\n\n"
+        # 버퍼를 밀어내기 위한 주석 전송
+        yield ": ping\n\n"
+        yield "event: connected\ndata: {\"status\": \"ready\"}\n\n"
         
         last_progress_idx = 0
         last_sent_status = None
@@ -94,7 +84,7 @@ async def get_status_sse(task_id: str, request: Request):
             task_info = tasks_db.get(task_id)
             if not task_info: break
 
-            # 1. 진행 상태 전송
+            # 1. Progress
             current_progress = task_info["progress"]
             if len(current_progress) > last_progress_idx:
                 for i in range(last_progress_idx, len(current_progress)):
@@ -102,24 +92,20 @@ async def get_status_sse(task_id: str, request: Request):
                     yield f"event: progress\ndata: {data}\n\n"
                 last_progress_idx = len(current_progress)
 
-            # 2. 상태 변경 감지
+            # 2. Status
             current_status = task_info["status"]
-            
             if current_status != last_sent_status:
                 if current_status == TaskStatus.EXTRACT_SUCCESS:
                     yield f"event: extract_result\ndata: {json.dumps(task_info['result'])}\n\n"
-                
                 elif current_status == TaskStatus.GENERATE_SUCCESS:
                     yield f"event: final_result\ndata: {json.dumps({'final_doc': task_info['final_doc']})}\n\n"
                     break
-                
                 elif current_status == TaskStatus.FAILED:
-                    yield f"event: error\ndata: {json.dumps({'message': task_info.get('message', 'Unknown error')})}\n\n"
+                    yield f"event: error\ndata: {json.dumps({'message': task_info.get('message', 'Err')})}\n\n"
                     break
-                
                 last_sent_status = current_status
 
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

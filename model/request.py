@@ -16,7 +16,6 @@ class InitialRequest(BaseModel):
     """
     hr_id: str
     hr_pw: str
-    sofotoken: str
     prompt: str
 
 class GenerationRequest(BaseModel):
