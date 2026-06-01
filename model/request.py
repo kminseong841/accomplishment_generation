@@ -9,6 +9,7 @@ class TaskStatus(str, Enum):
     GENERATING = "GENERATING"
     GENERATE_SUCCESS = "GENERATE_SUCCESS"
     FAILED = "FAILED"
+    CANCELED = "CANCELED"
 
 class InitialRequest(BaseModel):
     """

@@ -27,6 +27,10 @@ async def extracting_task(task_id: str, req: InitialRequest, sofotoken: str):
             "contexts": ["Ctx 1", "Ctx 2", "Ctx 3"]
         }
         tasks_db[task_id]["status"] = TaskStatus.EXTRACT_SUCCESS
+    except asyncio.CancelledError:
+        tasks_db[task_id]["status"] = TaskStatus.CANCELED
+        print(f"Task {task_id} was explicitly canceled.")
+        raise # 상위 루프로 전파
     except Exception as e:
         tasks_db[task_id]["status"] = TaskStatus.FAILED
         tasks_db[task_id]["message"] = str(e)
@@ -37,6 +41,10 @@ async def generating_task(task_id: str, req: GenerationRequest):
         await asyncio.sleep(0.1)
         tasks_db[task_id]["final_doc"] = f"Final document based on {len(req.selected_contexts)} contexts."
         tasks_db[task_id]["status"] = TaskStatus.GENERATE_SUCCESS
+    except asyncio.CancelledError:
+        tasks_db[task_id]["status"] = TaskStatus.CANCELED
+        print(f"Task {task_id} was explicitly canceled.")
+        raise
     except Exception as e:
         tasks_db[task_id]["status"] = TaskStatus.FAILED
         tasks_db[task_id]["message"] = str(e)
@@ -51,18 +59,58 @@ async def extract(request: InitialRequest, authorization: str = Header(...)):
         "progress": [],
         "result": None,
         "final_doc": None,
-        "message": None
+        "message": None,
+        "task_worker": None
     }
-    asyncio.create_task(extracting_task(task_id, request, authorization))
+    task = asyncio.create_task(extracting_task(task_id, request, authorization))
+    tasks_db[task_id]["task_worker"] = task
     return {"task_id": task_id, "status": TaskStatus.PENDING}
 
 @app.post("/api/generate", status_code=status.HTTP_202_ACCEPTED)
 async def generate(request: GenerationRequest):
     if request.task_id not in tasks_db:
         raise HTTPException(status_code=404, detail="Task not found")
+    
     tasks_db[request.task_id]["status"] = TaskStatus.GENERATING
-    asyncio.create_task(generating_task(request.task_id, request))
+    task = asyncio.create_task(generating_task(request.task_id, request))
+    tasks_db[request.task_id]["task_worker"] = task
     return {"task_id": request.task_id, "status": TaskStatus.GENERATING}
+
+@app.post("/api/cancel/{task_id}")
+async def cancel_task(task_id: str):
+    if task_id not in tasks_db:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_info = tasks_db[task_id]
+    current_status = task_info["status"]
+    
+    # 이미 완료되었거나 취소된 작업은 취소할 수 없음
+    if current_status in [TaskStatus.EXTRACT_SUCCESS, TaskStatus.GENERATE_SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELED]:
+        return {"task_id": task_id, "status": current_status, "message": "Task already finished or cannot be canceled"}
+
+    # 백그라운드 작업 중단
+    worker = task_info.get("task_worker")
+    if worker and not worker.done():
+        worker.cancel()
+    
+    task_info["status"] = TaskStatus.CANCELED
+    return {"task_id": task_id, "status": TaskStatus.CANCELED}
+
+@app.get("/api/poll/{task_id}")
+async def poll_status(task_id: str):
+    if task_id not in tasks_db:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task_info = tasks_db[task_id]
+    # 보안상 task_worker 객체는 제외하고 반환
+    return {
+        "task_id": task_id,
+        "status": task_info["status"],
+        "progress": task_info["progress"],
+        "result": task_info["result"],
+        "final_doc": task_info["final_doc"],
+        "message": task_info["message"]
+    }
 
 @app.get("/api/status/{task_id}")
 async def get_status_sse(task_id: str, request: Request):
@@ -102,6 +150,9 @@ async def get_status_sse(task_id: str, request: Request):
                     break
                 elif current_status == TaskStatus.FAILED:
                     yield f"event: error\ndata: {json.dumps({'message': task_info.get('message', 'Err')})}\n\n"
+                    break
+                elif current_status == TaskStatus.CANCELED:
+                    yield f"event: canceled\ndata: {json.dumps({'message': 'Task was canceled'})}\n\n"
                     break
                 last_sent_status = current_status
 

@@ -1,6 +1,4 @@
 아래 질문에 답할 것. (질문할 경우)
-## Q. API의 안정성을 테스트 하기 위해 100개의 client를 만들고 api server에 부하테스트를 하였으나, extracting과정에서 실패해. 그 이유를 분석할 것.
-### <참고사항>
-- 
-- extracting과정에서, 3가지 홈페이지를 로그인 하ㄴ 특정 홈페이지를 로그인 하는 과정에서 playright를 이용하여 chrome창을 키고 눌러서 로그인 과정이 있는데, 이를 100개의 client에 적용해서 문제가 발생함.
-- 
+## Q. 그러면 DB객체 제어는, 백그라운드 작업을 중지 시킨다음에, dek tasks_db[task_id] 등을 적용하나?
+## Q. 만약 asyncio.create_task를 통해 작업을 생성하지 않고, fastapi.background의 BackgroundTasks의 add_task를 이용하고 있다면 (내부망에서 적용되는 코드는 아직 asyncio.create_task를 적용하지 않았음.) 백그라운드 작업의 실제 중단이 어떻게 달라지나?>
+

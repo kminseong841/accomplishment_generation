@@ -1,3 +1,9 @@
-# app이 작동할 때 특정 task id를 지울 수 있는 cancel api를 설계하고 싶어.
-- 현재는 SSE 방식으로 status를 제공하지만, polling 방식으로 status를 조회한다고 '가정'할것
-- 단순히 task_id로 api를 routing 해서, DB 객체(딕셔너리)에 있는 값을 그냥 None으로 만들면 되는지, 아니면 딕셔너리의 키값 자체를 지우면 되는지, 여러 클라이언트에서 요청을 넣을때 문제는 없는지 등을 고려할 것.
+- [x] `main.py`: `BackgroundTasks`를 제거하고 `asyncio.create_task`를 사용하여 백그라운드 태스크 실행 (실시간 SSE 연동 최적화)
+- [x] `main.py`: `StreamingResponse`를 사용하여 테스트 환경 및 실제 환경 모두에서 안정적인 SSE 구현
+- [x] `model/request.py`: `TaskStatus` Enum 정의 추가로 상태 관리 체계화
+- [x] `test_main.py`: `uvicorn` 실제 서버 프로세스를 활용한 고신뢰도 비동기 통합 테스트 구현
+- [x] `main.py`: Authorization Header 인증 방식 적용 (Header 대소문자 무관 처리 확인)
+- [x] `main.py`: 작업 취소 API (`/api/cancel/{task_id}`) 및 폴링 API (`/api/poll/{task_id}`) 구현
+- [x] `main.py`: 백그라운드 태스크의 `asyncio.CancelledError` 처리를 통한 안전한 중단 로직 구현
+- [x] `test_cancel.py`: 취소 및 폴링 기능 검증을 위한 신규 테스트 추가
+- [x] 전체 테스트 (`uv run pytest`) 수행 및 모든 검증 통과
